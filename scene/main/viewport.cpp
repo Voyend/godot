@@ -46,9 +46,11 @@ STATIC_ASSERT_INCOMPLETE_TYPE(class, RenderingServer);
 #include "scene/gui/label.h"
 #include "scene/gui/popup.h"
 #include "scene/gui/subviewport_container.h"
+#include "scene/gui/texture_button.h"
 #include "scene/main/canvas_layer.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
+#include "scene/main/canvas_layer.h"
 #include "scene/resources/dpi_texture.h"
 #include "scene/resources/mesh.h"
 #include "scene/resources/text_line.h"
@@ -323,7 +325,11 @@ void Viewport::_sub_window_update_order() {
 	}
 
 	for (int i = 0; i < gui.sub_windows.size(); i++) {
-		RS::get_singleton()->canvas_item_set_draw_index(gui.sub_windows[i].canvas_item, i);
+		RS::get_singleton()->canvas_item_set_draw_index(gui.sub_windows[i].canvas_item, i * 2);
+		Control *overlay = ObjectDB::get_instance<Control>(gui.sub_windows[i].title_bar_overlay_id);
+		if (overlay) {
+			RS::get_singleton()->canvas_item_set_draw_index(overlay->get_canvas_item(), i * 2 + 1);
+		}
 	}
 }
 
@@ -342,7 +348,11 @@ void Viewport::_sub_window_register(Window *p_window) {
 	sw.canvas_item = RS::get_singleton()->canvas_item_create();
 	RS::get_singleton()->canvas_item_set_parent(sw.canvas_item, subwindow_canvas);
 	sw.window = p_window;
+	Control *overlay = p_window->_get_title_bar_overlay();
+	sw.title_bar_overlay_id = overlay ? (uint64_t)overlay->get_instance_id() : 0;
 	gui.sub_windows.push_back(sw);
+	// Deferred: add_child() fails while the embedder itself is entering the tree.
+	callable_mp(this, &Viewport::_sub_window_attach_title_bar).bind(p_window, sw.title_bar_overlay_id).call_deferred();
 
 	if (gui.subwindow_drag == SUB_WINDOW_DRAG_DISABLED) {
 		if (p_window->get_flag(Window::FLAG_NO_FOCUS)) {
@@ -361,6 +371,45 @@ void Viewport::_sub_window_register(Window *p_window) {
 	RenderingServer::get_singleton()->viewport_set_parent_viewport(p_window->viewport, viewport);
 }
 
+void Viewport::_sub_window_attach_title_bar(Window *p_window, uint64_t p_overlay_id) {
+	int index = _sub_window_find(p_window);
+	Control *overlay = ObjectDB::get_instance<Control>(ObjectID(p_overlay_id));
+	if (index == -1 || !overlay || gui.sub_windows[index].title_bar_overlay_id != ObjectID(p_overlay_id)) {
+		return; // Removed or replaced before this deferred call ran.
+	}
+	if (!title_bar_canvas_layer) {
+		title_bar_canvas_layer = memnew(CanvasLayer);
+		add_child(title_bar_canvas_layer, false, INTERNAL_MODE_BACK);
+	}
+	if (overlay->get_parent() && overlay->get_parent() != title_bar_canvas_layer) {
+		overlay->get_parent()->remove_child(overlay); // Window moved to another embedder.
+	}
+	if (overlay->get_parent() != title_bar_canvas_layer) {
+		title_bar_canvas_layer->add_child(overlay, false, INTERNAL_MODE_BACK);
+	}
+
+	// Same canvas layer as sw.canvas_item, otherwise the draw indices are meaningless.
+	RS::get_singleton()->canvas_item_set_parent(overlay->get_canvas_item(), subwindow_canvas);
+	RS::get_singleton()->canvas_item_set_draw_index(gui.sub_windows[index].canvas_item, index * 2);
+	RS::get_singleton()->canvas_item_set_draw_index(overlay->get_canvas_item(), index * 2 + 1);
+	_sub_window_update(p_window);
+}
+
+void Viewport::_sub_window_detach_title_bar(uint64_t p_overlay_id) {
+	Control *overlay = ObjectDB::get_instance<Control>(ObjectID(p_overlay_id));
+	if (!overlay || !title_bar_canvas_layer || overlay->get_parent() != title_bar_canvas_layer) {
+		return;
+	}
+	for (const SubWindow &s : gui.sub_windows) {
+		Control *title_bar_overlay = ObjectDB::get_instance<Control>(s.title_bar_overlay_id);
+		if (title_bar_overlay == overlay) {
+			return; // Re-registered in the meantime, keep it attached.
+		}
+	}
+	RS::get_singleton()->canvas_item_set_parent(overlay->get_canvas_item(), RID());
+	title_bar_canvas_layer->remove_child(overlay); // Detached, not freed: the Window owns it and keeps the user's controls.
+}
+
 void Viewport::_sub_window_update(Window *p_window) {
 	int index = _sub_window_find(p_window);
 
@@ -377,41 +426,23 @@ void Viewport::_sub_window_update(Window *p_window) {
 	RS::get_singleton()->canvas_item_clear(sw.canvas_item);
 	const Rect2i r = Rect2i(p_window->get_position(), p_window->get_size());
 
+	Control *overlay = ObjectDB::get_instance<Control>(sw.title_bar_overlay_id);
 	if (!p_window->get_flag(Window::FLAG_BORDERLESS)) {
 		TextServer::set_current_drawn_item_oversampling(get_oversampling());
 
 		Ref<StyleBox> panel = gui.subwindow_focused == p_window ? p_window->theme_cache.embedded_border : p_window->theme_cache.embedded_unfocused_border;
 		panel->draw(sw.canvas_item, r);
 
-		// Draw the title bar text.
-		Ref<Font> title_font = p_window->theme_cache.title_font;
-		int font_size = p_window->theme_cache.title_font_size;
-		Color title_color = p_window->theme_cache.title_color;
 		int title_height = p_window->theme_cache.title_height;
-		int close_h_ofs = p_window->theme_cache.close_h_offset;
-		int close_v_ofs = p_window->theme_cache.close_v_offset;
-
-		const real_t title_space = r.size.width - panel->get_minimum_size().x - close_h_ofs;
-		if (title_space > 0) {
-			TextLine title_text = TextLine(p_window->get_displayed_title(), title_font, font_size);
-			title_text.set_width(title_space);
-			title_text.set_direction(p_window->is_layout_rtl() ? TextServer::DIRECTION_RTL : TextServer::DIRECTION_LTR);
-			int x = (r.size.width - title_text.get_size().x) / 2;
-			int y = (-title_height - title_text.get_size().y) / 2;
-
-			Color font_outline_color = p_window->theme_cache.title_outline_modulate;
-			int outline_size = p_window->theme_cache.title_outline_size;
-			if (outline_size > 0 && font_outline_color.a > 0) {
-				title_text.draw_outline(sw.canvas_item, r.position + Point2(x, y), outline_size, font_outline_color);
-			}
-			title_text.draw(sw.canvas_item, r.position + Point2(x, y), title_color);
+		if (overlay) {
+			overlay->set_position(r.position - Point2(0, title_height));
+			overlay->set_size(Size2(r.size.width, title_height)); // Full bar: nothing is reserved for the close button.
+			overlay->show();
 		}
 
-		bool pressed = gui.subwindow_focused == sw.window && gui.subwindow_drag == SUB_WINDOW_DRAG_CLOSE && gui.subwindow_drag_close_inside;
-		Ref<Texture2D> close_icon = pressed ? p_window->theme_cache.close_pressed : p_window->theme_cache.close;
-		close_icon->draw(sw.canvas_item, r.position + Vector2(r.size.width - close_h_ofs, -close_v_ofs));
-
 		TextServer::set_current_drawn_item_oversampling(0.0);
+	} else if (overlay) {
+		overlay->hide();
 	}
 
 	const Transform2D xform = sw.window->window_transform * sw.window->stretch_transform;
@@ -507,6 +538,10 @@ void Viewport::_sub_window_remove(Window *p_window) {
 	if (gui.subwindow_over == sw.window) {
 		sw.window->_mouse_leave_viewport();
 		gui.subwindow_over = nullptr;
+	}
+	Control *overlay = ObjectDB::get_instance<Control>(sw.title_bar_overlay_id);
+	if (overlay) {
+		callable_mp(this, &Viewport::_sub_window_detach_title_bar).bind(sw.title_bar_overlay_id).call_deferred();
 	}
 	RS::get_singleton()->free_rid(sw.canvas_item);
 	gui.sub_windows.remove_at(index);
@@ -2966,17 +3001,23 @@ Viewport::SubWindowResize Viewport::_sub_window_get_resize_margin(Window *p_subw
 }
 
 bool Viewport::_sub_windows_forward_input(const Ref<InputEvent> &p_event) {
+	// A title bar control was pressed: hand it the rest of the interaction (motion, release).
+	Ref<InputEventMouse> mouse_ev = p_event;
+	if (mouse_ev.is_valid() && gui.mouse_focus) {
+		for (const SubWindow &s : gui.sub_windows) {
+			Control *overlay = ObjectDB::get_instance<Control>(s.title_bar_overlay_id);
+			if (overlay && overlay->is_ancestor_of(gui.mouse_focus)) {
+				_gui_input_event(p_event);
+				return true; // Return immediately: a pressed() handler may have hidden the window and changed the list.
+			}
+		}
+	}
+
 	if (gui.subwindow_drag != SUB_WINDOW_DRAG_DISABLED) {
 		ERR_FAIL_NULL_V(gui.currently_dragged_subwindow, false);
 
 		Ref<InputEventMouseButton> mb = p_event;
 		if (mb.is_valid() && !mb->is_pressed() && mb->get_button_index() == MouseButton::LEFT) {
-			if (gui.subwindow_drag == SUB_WINDOW_DRAG_CLOSE) {
-				if (gui.subwindow_drag_close_rect.has_point(mb->get_position())) {
-					// Close window.
-					gui.currently_dragged_subwindow->_event_callback(DisplayServerEnums::WINDOW_EVENT_CLOSE_REQUEST);
-				}
-			}
 			gui.subwindow_drag = SUB_WINDOW_DRAG_DISABLED;
 			if (gui.currently_dragged_subwindow != nullptr) { // May have been erased.
 				_sub_window_update(gui.currently_dragged_subwindow);
@@ -2999,9 +3040,6 @@ bool Viewport::_sub_windows_forward_input(const Ref<InputEvent> &p_event) {
 				if (DisplayServer::get_singleton()->has_feature(DisplayServerEnums::FEATURE_CURSOR_SHAPE)) {
 					DisplayServer::get_singleton()->cursor_set_shape(DisplayServerEnums::CURSOR_MOVE);
 				}
-			}
-			if (gui.subwindow_drag == SUB_WINDOW_DRAG_CLOSE) {
-				gui.subwindow_drag_close_inside = gui.subwindow_drag_close_rect.has_point(mm->get_position());
 			}
 			if (gui.subwindow_drag == SUB_WINDOW_DRAG_RESIZE) {
 				Vector2i diff = mm->get_position() - gui.subwindow_drag_from;
@@ -3111,28 +3149,31 @@ bool Viewport::_sub_windows_forward_input(const Ref<InputEvent> &p_event) {
 				if (title_bar.size.y > 0 && title_bar.has_point(mb->get_position())) {
 					click_on_window = sw.window;
 
-					int close_h_ofs = sw.window->theme_cache.close_h_offset;
-					int close_v_ofs = sw.window->theme_cache.close_v_offset;
-					bool pressed = gui.subwindow_focused == sw.window && gui.subwindow_drag == SUB_WINDOW_DRAG_CLOSE && gui.subwindow_drag_close_inside;
-					Ref<Texture2D> close_icon = pressed ? sw.window->theme_cache.close_pressed : sw.window->theme_cache.close;
-
-					Rect2 close_rect;
-					close_rect.position = Vector2(r.position.x + r.size.x - close_h_ofs, r.position.y - close_v_ofs);
-					close_rect.size = close_icon->get_size();
-
 					if (gui.subwindow_focused != sw.window) {
 						// Refocus.
 						_sub_window_grab_focus(sw.window);
 					}
 
-					if (close_rect.has_point(mb->get_position())) {
-						gui.subwindow_drag = SUB_WINDOW_DRAG_CLOSE;
-						gui.subwindow_drag_close_inside = true; // Starts inside.
-						gui.subwindow_drag_close_rect = close_rect;
-					} else {
-						gui.subwindow_drag = SUB_WINDOW_DRAG_MOVE;
+					Control *overlay = ObjectDB::get_instance<Control>(sw.title_bar_overlay_id);
+					if (overlay && overlay->is_inside_tree()) {
+						Control *hit = _gui_find_control_at_pos(overlay, mb->get_position(), overlay->get_canvas_transform());
+						if (hit && hit != overlay) {
+							// Same steps _gui_input_event() takes for a press, minus focus grabbing.
+							gui.mouse_focus = hit;
+							gui.mouse_focus_mask.set_flag(mouse_button_to_mask(mb->get_button_index()));
+							Ref<InputEventMouseButton> local_mb = mb->xformed_by(Transform2D()); // Make a copy.
+							local_mb->set_position(hit->get_global_transform_with_canvas().affine_inverse().xform(mb->get_position()));
+							_gui_call_input(hit, local_mb);
+							if (is_input_handled()) {
+								return true;
+							}
+							// Only PASS controls were hit: undo and treat it as a window move.
+							gui.mouse_focus = nullptr;
+							gui.mouse_focus_mask = MouseButtonMask::NONE;
+						}
 					}
 
+					gui.subwindow_drag = SUB_WINDOW_DRAG_MOVE;
 					gui.subwindow_drag_from = mb->get_position();
 					gui.subwindow_drag_pos = sw.window->get_position();
 
@@ -3308,6 +3349,7 @@ void Viewport::_update_mouse_over(const Ref<InputEventMouse> &p_mm) {
 
 void Viewport::_update_mouse_over(Vector2 p_pos) {
 	gui.last_mouse_pos = p_pos; // Necessary, because mouse cursor can be over Viewports that are not reached by the InputEvent.
+	Control *title_bar_hover = nullptr;
 	// Look for embedded windows at mouse position.
 	if (is_embedding_subwindows()) {
 		for (int i = gui.sub_windows.size() - 1; i >= 0; i--) {
@@ -3325,6 +3367,19 @@ void Viewport::_update_mouse_over(Vector2 p_pos) {
 			}
 
 			if (swrect_border.has_point(p_pos)) {
+				Control *overlay = ObjectDB::get_instance<Control>(gui.sub_windows[i].title_bar_overlay_id);
+				if (overlay && overlay->is_inside_tree() && !sw->get_flag(Window::FLAG_BORDERLESS)) {
+					Rect2 title_bar = swrect;
+					title_bar.position.y -= sw->theme_cache.title_height;
+					title_bar.size.y = sw->theme_cache.title_height;
+					if (title_bar.has_point(p_pos)) {
+						Control *hit = _gui_find_control_at_pos(overlay, p_pos, overlay->get_canvas_transform());
+						if (hit && hit != overlay) {
+							title_bar_hover = hit;
+							break; // Fall through to the regular Control hover handling below.
+						}
+					}
+				}
 				if (gui.mouse_over.is_valid()) {
 					_drop_mouse_over();
 				} else if (!gui.subwindow_over) {
@@ -3358,7 +3413,7 @@ void Viewport::_update_mouse_over(Vector2 p_pos) {
 	}
 
 	// Look for Controls at mouse position.
-	Control *over = gui_find_control(p_pos);
+	Control *over = title_bar_hover ? title_bar_hover : gui_find_control(p_pos);
 	ObjectID over_id = over ? over->get_instance_id() : ObjectID();
 	get_section_root_viewport()->gui.target_control = over;
 	bool notify_embedded_viewports = false;

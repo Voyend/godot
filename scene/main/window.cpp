@@ -40,6 +40,8 @@ STATIC_ASSERT_INCOMPLETE_TYPE(class, RenderingServer);
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "scene/gui/control.h"
+#include "scene/gui/label.h"
+#include "scene/gui/texture_button.h"
 #include "scene/main/scene_tree.h"
 #include "scene/theme/theme_db.h"
 #include "scene/theme/theme_owner.h"
@@ -350,6 +352,7 @@ void Window::set_title(const String &p_title) {
 	_update_displayed_title();
 
 	emit_signal("title_changed");
+	_sync_title_bar();
 }
 
 void Window::set_default_title(const String &p_title) {
@@ -372,6 +375,98 @@ String Window::get_title() const {
 String Window::get_displayed_title() const {
 	ERR_READ_THREAD_GUARD_V(String());
 	return displayed_title;
+}
+
+Control *Window::_get_title_bar_overlay() {
+	Control *overlay = ObjectDB::get_instance<Control>(title_bar_overlay_id);
+	if (overlay) {
+		return overlay;
+	}
+	overlay = memnew(Control);
+	overlay->set_mouse_filter(Control::MOUSE_FILTER_PASS);
+	title_bar_overlay_id = overlay->get_instance_id();
+
+	Label *title_label = memnew(Label);
+	title_label->set_name("TitleLabel");
+	title_label->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED); // Already translated (displayed_title).
+	title_label->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+	title_label->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
+	title_label->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+	overlay->add_child(title_label);
+
+	// Added after the label, so it draws (and hit-tests) above it. No z_index: it is canvas-wide.
+	TextureButton *close_button = memnew(TextureButton);
+	close_button->set_name("CloseButton");
+	close_button->set_focus_mode(Control::FOCUS_NONE);
+	close_button->connect(SceneStringName(pressed), callable_mp(this, &Window::_title_bar_close_pressed));
+	overlay->add_child(close_button);
+	
+	Viewport *parent_embedder = get_embedder();
+	if (parent_embedder) {
+		callable_mp(parent_embedder, &Viewport::_sub_window_attach_title_bar).bind(this, (uint64_t)overlay->get_instance_id()).call_deferred();
+	}
+
+	_sync_title_bar();
+	return overlay;
+}
+
+void Window::_title_bar_close_pressed() {
+	_event_callback(DisplayServerEnums::WINDOW_EVENT_CLOSE_REQUEST); // Same path the old hand-drawn button used.
+}
+
+void Window::_sync_title_bar() {
+	Control *overlay = ObjectDB::get_instance<Control>(title_bar_overlay_id);
+	if (!overlay) {
+		return;
+	}
+	overlay->set_theme(get_theme());
+
+	// Default children are found by name: if the user removed or freed them, this is a no-op.
+	Label *title_label = Object::cast_to<Label>(overlay->get_node_or_null(NodePath("TitleLabel")));
+	if (title_label) {
+		title_label->set_text(get_displayed_title());
+		title_label->set_layout_direction(is_layout_rtl() ? Control::LAYOUT_DIRECTION_RTL : Control::LAYOUT_DIRECTION_LTR);
+		title_label->add_theme_font_override(SNAME("font"), theme_cache.title_font);
+		title_label->add_theme_font_size_override(SNAME("font_size"), theme_cache.title_font_size);
+		title_label->add_theme_color_override(SNAME("font_color"), theme_cache.title_color);
+		title_label->add_theme_color_override(SNAME("font_outline_color"), theme_cache.title_outline_modulate);
+		title_label->add_theme_constant_override(SNAME("outline_size"), theme_cache.title_outline_size);
+	}
+	TextureButton *close_button = Object::cast_to<TextureButton>(overlay->get_node_or_null(NodePath("CloseButton")));
+	if (close_button) {
+		close_button->set_texture_normal(theme_cache.close);
+		close_button->set_texture_pressed(theme_cache.close_pressed);
+		close_button->set_anchors_preset(Control::PRESET_TOP_RIGHT);
+		close_button->set_h_grow_direction(Control::GROW_DIRECTION_BEGIN); // Starts at the top right corner and grows to the left.
+		close_button->set_offset(SIDE_LEFT, 0);
+		close_button->set_offset(SIDE_RIGHT, 0);
+		close_button->set_offset(SIDE_TOP, 0);
+		close_button->set_offset(SIDE_BOTTOM, 0);
+		close_button->set_offset_transform_enabled(true);
+		close_button->set_offset_transform_position(Vector2(theme_cache.close_h_offset, theme_cache.close_v_offset));
+	}
+}
+
+void Window::add_title_bar_control(Control *p_control) {
+	ERR_FAIL_NULL(p_control);
+	_get_title_bar_overlay()->add_child(p_control); // Plain append, no special cases.
+}
+
+void Window::remove_title_bar_control(Control *p_control) {
+	ERR_FAIL_NULL(p_control);
+	Control *overlay = _get_title_bar_overlay();
+	ERR_FAIL_COND_MSG(p_control->get_parent() != overlay, "The control is not a title bar control of this window.");
+	overlay->remove_child(p_control); // Detached, not freed: the caller owns it.
+}
+
+Control *Window::get_title_bar_control(int p_index) const {
+	Control *overlay = const_cast<Window *>(this)->_get_title_bar_overlay();
+	ERR_FAIL_INDEX_V(p_index, overlay->get_child_count(), nullptr);
+	return Object::cast_to<Control>(overlay->get_child(p_index));
+}
+
+int Window::get_title_bar_control_count() const {
+	return const_cast<Window *>(this)->_get_title_bar_overlay()->get_child_count();
 }
 
 void Window::_settings_changed() {
@@ -1801,12 +1896,14 @@ void Window::_notification(int p_what) {
 			emit_signal(SceneStringName(theme_changed));
 			_invalidate_theme_cache();
 			_update_theme_item_cache();
+			_sync_title_bar();
 		} break;
 
 		case NOTIFICATION_TRANSLATION_CHANGED: {
 			_invalidate_theme_cache();
 			_update_theme_item_cache();
 			_update_displayed_title();
+			_sync_title_bar();
 		} break;
 
 		case NOTIFICATION_VISIBILITY_CHANGED: {
@@ -3489,6 +3586,11 @@ void Window::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_title", "title"), &Window::set_title);
 	ClassDB::bind_method(D_METHOD("get_title"), &Window::get_title);
 
+	ClassDB::bind_method(D_METHOD("add_title_bar_control", "control"), &Window::add_title_bar_control);
+	ClassDB::bind_method(D_METHOD("remove_title_bar_control", "control"), &Window::remove_title_bar_control);
+	ClassDB::bind_method(D_METHOD("get_title_bar_control", "index"), &Window::get_title_bar_control);
+	ClassDB::bind_method(D_METHOD("get_title_bar_control_count"), &Window::get_title_bar_control_count);
+
 	ClassDB::bind_method(D_METHOD("set_initial_position", "initial_position"), &Window::set_initial_position);
 	ClassDB::bind_method(D_METHOD("get_initial_position"), &Window::get_initial_position);
 
@@ -3853,6 +3955,15 @@ Window::~Window() {
 		focused_window = nullptr;
 	}
 	memdelete(theme_owner);
+
+	Control *overlay = ObjectDB::get_instance<Control>(title_bar_overlay_id);
+	if (overlay) { // Normally still attached; null only if something else already freed it.
+		if (overlay->get_parent()) {
+			overlay->queue_free();
+		} else {
+			memdelete(overlay);
+		}
+	}
 
 	// Resources need to be disconnected.
 	for (KeyValue<StringName, Ref<Texture2D>> &E : theme_icon_override) {

@@ -256,6 +256,7 @@ private:
 	RID viewport;
 	RID current_canvas;
 	RID subwindow_canvas;
+	CanvasLayer *title_bar_canvas_layer = nullptr; // Lazily created; holds every subwindow's title bar overlay.
 
 	Transform2D canvas_transform;
 	Transform2D global_canvas_transform;
@@ -347,7 +348,6 @@ private:
 	enum SubWindowDrag {
 		SUB_WINDOW_DRAG_DISABLED,
 		SUB_WINDOW_DRAG_MOVE,
-		SUB_WINDOW_DRAG_CLOSE,
 		SUB_WINDOW_DRAG_RESIZE,
 	};
 
@@ -369,6 +369,7 @@ private:
 		RID canvas_item;
 		Rect2i parent_safe_rect;
 		bool pending_window_update = false;
+		ObjectID title_bar_overlay_id; // Owned by the Window, borrowed here.
 	};
 
 	// VRS
@@ -419,8 +420,6 @@ private:
 		SubWindowDrag subwindow_drag = SUB_WINDOW_DRAG_DISABLED;
 		Vector2 subwindow_drag_from;
 		Vector2 subwindow_drag_pos;
-		Rect2i subwindow_drag_close_rect;
-		bool subwindow_drag_close_inside = false;
 		SubWindowResize subwindow_resize_mode;
 		Rect2i subwindow_resize_from_rect;
 
@@ -501,6 +500,8 @@ private:
 	void _sub_window_update(Window *p_window);
 	void _sub_window_grab_focus(Window *p_window);
 	void _sub_window_remove(Window *p_window);
+	void _sub_window_attach_title_bar(Window *p_window, uint64_t p_overlay_id);
+	void _sub_window_detach_title_bar(uint64_t p_overlay_id);
 	int _sub_window_find(Window *p_window) const;
 	bool _sub_windows_forward_input(const Ref<InputEvent> &p_event);
 	SubWindowResize _sub_window_get_resize_margin(Window *p_subwindow, const Point2 &p_point);

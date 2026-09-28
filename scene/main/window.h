@@ -34,6 +34,7 @@
 #include "scene/resources/theme.h"
 #include "servers/display/display_server_enums.h"
 
+class Control;
 class Font;
 class StyleBox;
 class ThemeOwner;
@@ -155,6 +156,10 @@ private:
 
 	void _update_child_controls();
 	void _update_embedded_window();
+	ObjectID title_bar_overlay_id; // Owned by this Window; parented to the embedder only while embedded.
+	Control *_get_title_bar_overlay();
+	void _sync_title_bar();
+	void _title_bar_close_pressed();
 
 	Size2i content_scale_size;
 	ContentScaleMode content_scale_mode = CONTENT_SCALE_MODE_DISABLED;
@@ -317,6 +322,10 @@ public:
 	void set_default_title(const String &p_title);
 	String get_title() const;
 	String get_displayed_title() const;
+	void add_title_bar_control(Control *p_control);
+	void remove_title_bar_control(Control *p_control);
+	Control *get_title_bar_control(int p_index) const;
+	int get_title_bar_control_count() const;
 
 	void set_initial_position(WindowInitialPosition p_initial_position);
 	WindowInitialPosition get_initial_position() const;
