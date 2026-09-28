@@ -81,6 +81,16 @@
 				See also [method get_theme_stylebox] and [method Control.add_theme_stylebox_override] for more details.
 			</description>
 		</method>
+		<method name="add_title_bar_control">
+			<return type="void" />
+			<param index="0" name="control" type="Control" />
+			<description>
+				Adds [param control] as a child of this window's title bar overlay. Only has a visible effect while the window is embedded. (see [method is_embedded])
+				On a native window the control is stored but not displayed, and a warning is printed. Controls are simply appended: the overlay does not lay them out with a container, so [param control]'s position and size must be set through its anchors and offsets.
+				By default the overlay already contains two children: a title [Label] and a close [TextureButton] wired to emit [signal close_requested], at indices [code]0[/code] and [code]1[/code]. Remove either with [method remove_title_bar_control] to replace or reposition it.
+				The overlay is an internal node owned by the [Window], not a regular child of it, it is not duplicated when the window is duplicated, and code should not rely on [method Node.get_parent] called on [param control] to reach or modify it directly.
+			</description>
+		</method>
 		<method name="begin_bulk_theme_override">
 			<return type="void" />
 			<description>
@@ -260,6 +270,21 @@
 			<description>
 				Returns a [StyleBox] from the first matching [Theme] in the tree if that [Theme] has a stylebox item with the specified [param name] and [param theme_type].
 				See [method Control.get_theme_color] for details.
+			</description>
+		</method>
+		<method name="get_title_bar_control" qualifiers="const">
+			<return type="Control" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the title bar control at [param index], or [code]null[/code] if out of range.
+				Index [code]0[/code] is the default title [Label] and index [code]1[/code] is the default close [TextureButton], unless they were removed with [method remove_title_bar_control], controls added with [method add_title_bar_control] follow after them, in the order they were added.
+			</description>
+		</method>
+		<method name="get_title_bar_control_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of controls in the title bar overlay, including the default title label and close button unless they have been removed.
+				Use together with [method get_title_bar_control] to iterate over them.
 			</description>
 		</method>
 		<method name="get_window_id" qualifiers="const">
@@ -576,6 +601,13 @@
 			<param index="0" name="name" type="StringName" />
 			<description>
 				Removes a local override for a theme [StyleBox] with the specified [param name] previously added by [method add_theme_stylebox_override] or via the Inspector dock.
+			</description>
+		</method>
+		<method name="remove_title_bar_control">
+			<return type="void" />
+			<param index="0" name="control" type="Control" />
+			<description>
+				Removes [param control] from the title bar overlay added via [method add_title_bar_control]. The control is not freed: the caller keeps ownership and is responsible for freeing it if it is no longer needed. This can also remove the default title [Label] or close [TextureButton] (indices [code]0[/code] and [code]1[/code]) in order to replace them. Removing the close button does not disable closing the window, it only removes its built-in UI — connect a custom control to [signal close_requested] instead.
 			</description>
 		</method>
 		<method name="request_attention">
